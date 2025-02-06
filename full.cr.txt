@@ -1,44 +1,4 @@
 ==================== 
-FILE: projekt_db/main.py 
-
-# main.py
-from PyQt5.QtWidgets import QApplication
-from data.data_loader import load_data
-from models.bd_model import BDModel
-from ui.main_window import MainWindow
-from ui.matrix_config_editor import MatrixConfigEditor
-from data.data_editor import DataEditorDialog
-
-if __name__ == "__main__":
-    app = QApplication([])
-
-    # Inicjalizacja modelu
-    model = BDModel()
-
-    # Wczytanie danych
-    data = load_data()
-
-    # Próba wczytania lub przetrenowania modeli
-    print("Próba wczytania istniej¹cych modeli...")
-    model.train_models(data, force_retrain=False)
-
-    # Przygotowanie konfiguratora matryc
-    grubosci = sorted(data['Grubosc'].unique())
-    matryce = sorted(set(data['V'].unique()))
-    matrix_config_editor = MatrixConfigEditor(grubosci, matryce)
-
-    # Inicjalizacja edytora danych
-    data_editor = DataEditorDialog(data)
-
-    # Utworzenie g³ównego okna aplikacji
-    window = MainWindow(data, model, matrix_config_editor, data_editor)
-    window.populate_comboboxes()
-    window.show()
-
-    app.exec_()
- 
-
-==================== 
 FILE: projekt_db/data/data_editor.py 
 
 # data/data_editor.py
@@ -471,17 +431,25 @@ import ezdxf
 
 
 class CustomGraphicsView(QGraphicsView):
-    """QGraphicsView rozszerzony o panning oraz wykrywanie klikniêæ w pobli¿u linii giêcia."""
+    """QGraphicsView z manualnym panningiem i obs³ug¹ kursora:
+       - Domyœlnie kursor to strza³ka (Qt.ArrowCursor)
+       - Podczas przytrzymania lewego przycisku – kursor zmienia siê na r¹czkê (Qt.ClosedHandCursor)
+       - Po puszczeniu – kursor wraca do strza³ki.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setRenderHint(QPainter.Antialiasing)
-        self.setDragMode(QGraphicsView.ScrollHandDrag)
+        # Wy³¹czamy automatyczny tryb dragowania – u¿ywamy w³asnego panningu
+        self.setDragMode(QGraphicsView.NoDrag)
         self.setInteractive(True)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self._mouse_pressed_position = QPoint()
+        self._panStart = QPoint()
+        self._isPanning = False
         self.padding = 500
+        self.setCursor(Qt.ArrowCursor)
         self.main_window = None
 
     def set_scene_padding(self):
@@ -513,10 +481,17 @@ class CustomGraphicsView(QGraphicsView):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._mouse_pressed_position = event.pos()
+            self._panStart = event.pos()
+            self._isPanning = True
             self.viewport().setCursor(Qt.ClosedHandCursor)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._isPanning:
+            # Obliczamy przesuniêcie delta w widoku i stosujemy translate() do GUW
+            delta = event.pos() - self._panStart
+            self._panStart = event.pos()
+            self.translate(delta.x(), delta.y())
         if self.main_window is not None:
             scene_pos = self.mapToScene(event.pos())
             self.main_window.update_status_bar(scene_pos)
@@ -524,7 +499,7 @@ class CustomGraphicsView(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.viewport().setCursor(Qt.OpenHandCursor)
+            self.viewport().setCursor(Qt.ArrowCursor)
             if (event.pos() - self._mouse_pressed_position).manhattanLength() < 10:
                 try:
                     pos = self.mapToScene(event.pos())
@@ -556,6 +531,7 @@ class CustomGraphicsView(QGraphicsView):
                         print("No bending line found within tolerance.")
                 except Exception as e:
                     print("Exception in mouseReleaseEvent:", e)
+            self._isPanning = False
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
@@ -566,6 +542,26 @@ class CustomGraphicsView(QGraphicsView):
         else:
             self.scale(zoom_out_factor, zoom_out_factor)
 
+    def drawForeground(self, painter, rect):
+        # Resetujemy transformacjê, aby rysowaæ w uk³adzie widoku (viewport)
+        painter.resetTransform()
+        pen = QPen(QColor("red"))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        # Pobieramy wymiary widoku
+        viewRect = self.viewport().rect()
+        center = viewRect.center()
+
+        self.centerX = center.x()
+        self.centerY = center.y()
+
+
+        # Rysujemy poziom¹ liniê od lewej do prawej krawêdzi widoku, przy sta³ej wspó³rzêdnej Y = center.y()
+        painter.drawLine(viewRect.left(), center.y(), viewRect.right(), center.y())
+        # Rysujemy pionow¹ liniê od góry do do³u widoku, przy sta³ej wspó³rzêdnej X = center.x()
+        painter.drawLine(center.x(), viewRect.top(), center.x(), viewRect.bottom())
+        print(f"Ycenter = {self.centerY}, Xcenter = {self.centerX}")
+
 
 class MainWindow(QMainWindow):
     def __init__(self, data, model, matrix_config_editor, data_editor):
@@ -573,25 +569,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Kalkulator Ubytku Materia³u BD")
         self.data = data
         self.model = model
-        self.matrix_config_editor = matrix_config_editor  # Instancja QDialog do konfiguracji matryc
-        self.data_editor = data_editor  # Instancja QDialog do edycji danych treningowych
+        self.matrix_config_editor = matrix_config_editor
+        self.data_editor = data_editor
         self.last_selected_x = None
         self.dxf_scene = QGraphicsScene()
         self.init_ui()
-        self.create_menus()  # Dodanie menu g³ównego
+        self.create_menus()
         self.showMaximized()
 
     def init_ui(self):
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("X: 0.00, Y: 0.00")
-
         self.main_widget = QWidget()
         self.main_layout = QHBoxLayout()
 
         # Lewa sekcja – parametry i tabela segmentów
         left_widget = QWidget()
         left_layout = QVBoxLayout()
-
         params_layout = QHBoxLayout()
         self.grubosc_input = QComboBox()
         self.grubosc_input.currentIndexChanged.connect(self.update_v_input)
@@ -605,7 +599,6 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(QLabel("Materia³:"))
         params_layout.addWidget(self.material_input)
         left_layout.addLayout(params_layout)
-
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["D³ugoœæ [mm]", "K¹t giêcia [°]", "BD [mm]", ""])
         self.table.horizontalHeader().setStretchLastSection(False)
@@ -615,15 +608,12 @@ class MainWindow(QMainWindow):
         self.last_selected_x = None
         self.remove_all_plus_rows()
         self.ensure_plus_row()
-
         self.calculate_button = QPushButton("Oblicz £¹czn¹ D³ugoœæ")
         self.calculate_button.clicked.connect(self.calculate_total_bd)
         left_layout.addWidget(self.calculate_button)
-
         self.result_label = QLabel()
         self.result_label.setAlignment(Qt.AlignCenter)
         left_layout.addWidget(self.result_label)
-
         left_widget.setLayout(left_layout)
         left_widget.setFixedWidth(400)
 
@@ -635,42 +625,32 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(load_dxf_button)
         self.dxf_view = CustomGraphicsView()
         self.dxf_view.setScene(self.dxf_scene)
+        # Ustawiamy alignment na œrodek – GUW pocz¹tkowo wycentrowany
         self.dxf_view.setAlignment(Qt.AlignCenter)
-        self.dxf_view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.dxf_view.setDragMode(QGraphicsView.NoDrag)
         self.dxf_view.main_window = self
         right_layout.addWidget(self.dxf_view)
         right_widget.setLayout(right_layout)
-
         self.main_layout.addWidget(left_widget, stretch=1)
         self.main_layout.addWidget(right_widget, stretch=3)
-
         self.main_widget.setLayout(self.main_layout)
         self.setCentralWidget(self.main_widget)
 
     def create_menus(self):
-        """Tworzy menu g³ówne aplikacji z opcjami otwierania modu³ów konfiguracji."""
         menubar = self.menuBar()
         konfiguracja_menu = menubar.addMenu("Konfiguracja")
-
-        # Akcja otwieraj¹ca okno konfiguracji matryc
         matrix_config_action = QAction("Konfiguracja matryc", self)
         matrix_config_action.triggered.connect(self.openMatrixConfigEditor)
         konfiguracja_menu.addAction(matrix_config_action)
-
-        # Akcja otwieraj¹ca okno edycji danych treningowych
         data_editor_action = QAction("Edycja danych treningowych", self)
         data_editor_action.triggered.connect(self.openDataEditor)
         konfiguracja_menu.addAction(data_editor_action)
 
     def openMatrixConfigEditor(self):
-        """Otwiera okno dialogowe do konfiguracji matryc."""
-        # Mo¿emy otworzyæ istniej¹c¹ instancjê lub utworzyæ now¹, jeœli wymagane.
         self.matrix_config_editor.exec_()
-        # Po zamkniêciu okna warto zaktualizowaæ dostêpne wartoœci V
         self.update_v_input()
 
     def openDataEditor(self):
-        """Otwiera okno dialogowe do edycji danych treningowych."""
         self.data_editor.exec_()
 
     def update_status_bar(self, pos: QPointF):
@@ -746,7 +726,7 @@ class MainWindow(QMainWindow):
         if n <= 0:
             return
         segments = []
-        for row in range(n):
+        for row in range(self.table.rowCount() - 1):
             item = self.table.item(row, 0)
             if item is not None:
                 absolute_x = item.data(Qt.UserRole + 1)
@@ -778,14 +758,15 @@ class MainWindow(QMainWindow):
                     if item is not None:
                         line_id = item.data(Qt.UserRole)
                         if line_id is not None:
-                            for scene_item in self.dxf_scene.items():
-                                if isinstance(scene_item, QGraphicsLineItem) and scene_item.data(1) == "selected":
-                                    if id(scene_item) == line_id:
-                                        pen = QPen(QColor("yellow"))
-                                        scene_item.setPen(pen)
-                                        scene_item.setData(1, None)
-                                        print("Minus clicked: Unselected bending line with id", line_id)
-                                        break
+                            for scene_item in list(self.dxf_scene.items()):
+                                if (isinstance(scene_item, QGraphicsLineItem) and
+                                        scene_item.data(1) == "selected" and
+                                        id(scene_item) == line_id):
+                                    pen = QPen(QColor("yellow"))
+                                    scene_item.setPen(pen)
+                                    scene_item.setData(1, None)
+                                    print("Minus clicked: Unselected bending line with id", line_id)
+                                    break
                     self.table.removeRow(row)
                     break
         if self.table.rowCount() == 0:
@@ -802,7 +783,6 @@ class MainWindow(QMainWindow):
             self.last_selected_x = None
             self.remove_all_plus_rows()
             self.ensure_plus_row()
-
             doc = ezdxf.readfile(file_path)
             self.dxf_scene.clear()
             for entity in doc.modelspace():
@@ -811,33 +791,31 @@ class MainWindow(QMainWindow):
                     end = entity.dxf.end
                     if hasattr(entity.dxf, 'color') and entity.dxf.color == 2:
                         pen = QPen(QColor("yellow"))
-                        bending_line = QGraphicsLineItem(start.x, -start.y, end.x, -end.y)
+                        bending_line = QGraphicsLineItem(start.x, start.y, end.x, end.y)
                         bending_line.setPen(pen)
                         bending_line.setData(0, "bending")
                         self.dxf_scene.addItem(bending_line)
                     else:
-                        self.dxf_scene.addLine(start.x, -start.y, end.x, -end.y)
+                        self.dxf_scene.addLine(start.x, start.y, end.x, end.y)
                 elif entity.dxftype() == 'CIRCLE':
                     center = entity.dxf.center
                     radius = entity.dxf.radius
-                    self.dxf_scene.addEllipse(center.x - radius, -center.y - radius, 2 * radius, 2 * radius)
+                    self.dxf_scene.addEllipse(center.x - radius, center.y - radius, 2 * radius, 2 * radius)
                 elif entity.dxftype() == 'ARC':
                     center = entity.dxf.center
                     radius = entity.dxf.radius
                     start_angle = entity.dxf.start_angle
                     end_angle = entity.dxf.end_angle
-                    start_angle_qt = -start_angle
-                    span_angle_qt = -(end_angle - start_angle)
-                    rect = QRectF(center.x - radius, -center.y - radius, 2 * radius, 2 * radius)
+                    rect = QRectF(center.x - radius, center.y - radius, 2 * radius, 2 * radius)
                     path = QPainterPath()
-                    path.arcMoveTo(rect, start_angle_qt)
-                    path.arcTo(rect, start_angle_qt, span_angle_qt)
+                    path.arcMoveTo(rect, start_angle)
+                    path.arcTo(rect, start_angle, (end_angle - start_angle))
                     self.dxf_scene.addPath(path)
                 elif entity.dxftype() == 'POLYLINE':
-                    points = [point for point in entity.points()]
+                    points = list(entity.points())
                     for i in range(len(points) - 1):
-                        self.dxf_scene.addLine(points[i][0], -points[i][1],
-                                               points[i + 1][0], -points[i + 1][1])
+                        self.dxf_scene.addLine(points[i][0], points[i][1],
+                                               points[i + 1][0], points[i + 1][1])
                 elif entity.dxftype() == 'LWPOLYLINE':
                     points = list(entity.points())
                     for i in range(len(points)):
@@ -845,16 +823,18 @@ class MainWindow(QMainWindow):
                         end_point = points[(i + 1) % len(points)]
                         bulge = start_point[4] if len(start_point) > 4 else 0
                         if bulge == 0:
-                            self.dxf_scene.addLine(start_point[0], -start_point[1],
-                                                   end_point[0], -end_point[1])
+                            self.dxf_scene.addLine(start_point[0], start_point[1],
+                                                   end_point[0], end_point[1])
                         else:
                             self.draw_bulge_arc(start_point, end_point, bulge)
                 else:
                     print(f"Nieobs³ugiwany typ: {entity.dxftype()}")
+            # Ustalamy LUW: przesuwamy elementy sceny, aby lewy dolny róg geometrii (LUW) by³ w (0,0)
             self.adjust_scene_origin()
+            # GUW: Reset transformacji, odwrócenie osi Y, wycentrowanie rysunku
             self.dxf_view.resetTransform()
-            self.dxf_view.fitInView(self.dxf_scene.sceneRect(), Qt.KeepAspectRatio)
-            self.dxf_view.centerOn(self.dxf_scene.sceneRect().center())
+            self.dxf_view.scale(1, -1)
+            self.center_dxf_in_view()
         except Exception as e:
             QMessageBox.warning(self, "B³¹d", f"Nie uda³o siê wczytaæ pliku DXF:\n{e}")
 
@@ -873,15 +853,46 @@ class MainWindow(QMainWindow):
         self.dxf_scene.addPath(path)
 
     def adjust_scene_origin(self):
+        """Przesuwa rysunek tak, aby LUW mia³o (0,0) w lewym dolnym rogu geometrii.
+           Dla rysunków AutoCada przyjmujemy:
+             min_x = bounding_rect.left()
+             min_y = bounding_rect.top()
+        """
         bounding_rect = self.dxf_scene.itemsBoundingRect()
         print("Before adjust_scene_origin, bounding_rect:", bounding_rect)
-        dx = -bounding_rect.left()
-        dy = -bounding_rect.bottom()
-        for item in self.dxf_scene.items():
+        min_x = bounding_rect.left()
+        min_y = bounding_rect.top()
+        dx = -min_x
+        dy = -min_y
+        print(f"dx={dx}, dy= {dy}")
+        print(f"Przesuwam rysunek o dx={dx}, dy={dy}, aby LUW (0,0) by³ w lewym dolnym rogu.")
+        for item in list(self.dxf_scene.items()):
+            # item.moveBy(dx, dy)
             item.moveBy(dx, dy)
         new_rect = self.dxf_scene.itemsBoundingRect()
-        self.dxf_scene.setSceneRect(0, 0, new_rect.width(), new_rect.height())
+
+        # Dodajemy margines, aby scena by³a wiêksza ni¿ sama geometria rysunku –
+        # to umo¿liwi panning nawet, gdy rysunek mieœci siê w oknie.
+        margin = 5000  # Mo¿esz dostosowaæ tê wartoœæ
+        new_rect = new_rect.adjusted(-margin, -margin, margin, margin)
+
+        self.dxf_scene.setSceneRect(new_rect)
         print("After adjust_scene_origin, sceneRect:", self.dxf_scene.sceneRect())
+
+
+    def center_dxf_in_view(self):
+        """GUW: Centruje rysunek (bez modyfikacji LUW) przy pomocy transformacji widoku.
+           Oblicza przesuniêcie miêdzy œrodkiem sceny a œrodkiem widoku i stosuje translate().
+        """
+        # Reset transformacji, zachowuj¹c ustawienie LUW (transformacja LUW pozostaje)
+        self.dxf_view.resetTransform()
+        # Najpierw odwracamy oœ Y, aby wspó³rzêdne rosnê³y w górê
+        self.dxf_view.scale(1, -1)
+        # Obliczamy œrodek widoku (w punktach widoku) i przeliczamy na wspó³rzêdne sceny
+        view_center = self.dxf_view.mapToScene(self.dxf_view.viewport().rect().center())
+        scene_center = self.dxf_scene.sceneRect().center()
+        offset = scene_center - view_center
+        self.dxf_view.translate(offset.x(), offset.y())
 
     def handle_bending_line_click(self, item, clicked_point):
         new_line_x = clicked_point.x()
@@ -951,7 +962,7 @@ class MainWindow(QMainWindow):
                     if item is not None:
                         line_id = item.data(Qt.UserRole)
                         if line_id is not None:
-                            for scene_item in self.dxf_scene.items():
+                            for scene_item in list(self.dxf_scene.items()):
                                 if (isinstance(scene_item, QGraphicsLineItem) and
                                         scene_item.data(1) == "selected" and
                                         id(scene_item) == line_id):
@@ -1021,6 +1032,9 @@ class MainWindow(QMainWindow):
             self.grubosc_input.addItems([str(x) for x in grubosc_values])
             if grubosc_values:
                 self.update_v_input()
+
+
+## jest ok
  
 
 ==================== 
@@ -1207,5 +1221,45 @@ def parse_decimal_input(value):
         return float(value.replace(',', '.'))
     except ValueError:
         raise ValueError(f"Niepoprawny format liczbowy: {value}")
+ 
+
+==================== 
+FILE: projekt_db/main.py 
+
+# main.py
+from PyQt5.QtWidgets import QApplication
+from data.data_loader import load_data
+from models.bd_model import BDModel
+from ui.main_window import MainWindow
+from ui.matrix_config_editor import MatrixConfigEditor
+from data.data_editor import DataEditorDialog
+
+if __name__ == "__main__":
+    app = QApplication([])
+
+    # Inicjalizacja modelu
+    model = BDModel()
+
+    # Wczytanie danych
+    data = load_data()
+
+    # Próba wczytania lub przetrenowania modeli
+    print("Próba wczytania istniej¹cych modeli...")
+    model.train_models(data, force_retrain=False)
+
+    # Przygotowanie konfiguratora matryc
+    grubosci = sorted(data['Grubosc'].unique())
+    matryce = sorted(set(data['V'].unique()))
+    matrix_config_editor = MatrixConfigEditor(grubosci, matryce)
+
+    # Inicjalizacja edytora danych
+    data_editor = DataEditorDialog(data)
+
+    # Utworzenie g³ównego okna aplikacji
+    window = MainWindow(data, model, matrix_config_editor, data_editor)
+    window.populate_comboboxes()
+    window.show()
+
+    app.exec_()
  
 

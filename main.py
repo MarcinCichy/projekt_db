@@ -16,7 +16,6 @@ if __name__ == "__main__":
     data = load_data()
 
     # Próba wczytania lub przetrenowania modeli
-    print("Próba wczytania istniejących modeli...")
     model.train_models(data, force_retrain=False)
 
     # Przygotowanie konfiguratora matryc
@@ -30,6 +29,6 @@ if __name__ == "__main__":
     # Utworzenie głównego okna aplikacji
     window = MainWindow(data, model, matrix_config_editor, data_editor)
     window.populate_comboboxes()
-    window.show()
+    window.showMaximized()  # Uruchomienie na pełnym ekranie
 
     app.exec_()
