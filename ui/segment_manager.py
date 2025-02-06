@@ -171,7 +171,8 @@ class SegmentManager:
                     bd_item.setFlags(Qt.ItemIsEnabled)
                     self.table.setItem(row, 2, bd_item)
 
-            self.parent.segment_result_label.setText(
+            # self.parent.segment_result_label.setText(
+            self.result_label.setText(
                 f"Łączna Długość: {total_length:.2f} mm\nŁączny Ubytek (BD): {total_bd:.2f} mm"
             )
         except Exception as e:
